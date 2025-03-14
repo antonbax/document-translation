@@ -194,18 +194,55 @@ const getGitHubReleaseBranches = async (
     return choices;
 };
 
-const canTokenRepoHook = async (token: string): Promise<boolean> => {
-	const url = `https://api.github.com/authorizations`;
-	const response = await fetch(url, {
+const canTokenRepoHook = async (token: string, repoOwner: string, repoName: string): Promise<boolean> => {
+	// First check if the token has repo_hook scope
+	const authUrl = `https://api.github.com/authorizations`;
+	const authResponse = await fetch(authUrl, {
 		headers: {
 			Authorization: `Bearer ${token}`,
 		},
 	});
-	const scopes = response.headers.get("x-oauth-scopes");
-	if (scopes && scopes.includes("repo_hook")) {
-		return true;
+	const scopes = authResponse.headers.get("x-oauth-scopes");
+	
+	// If the token doesn't even have repo_hook scope, it definitely can't create hooks
+	if (!scopes || !scopes.includes("repo_hook")) {
+		if (scopes && scopes.includes("public_repo")) {
+			// public_repo includes repo hook permissions for public repositories
+			// We should check if the repository is public
+			const repoUrl = `https://api.github.com/repos/${repoOwner}/${repoName}`;
+			const repoResponse = await fetch(repoUrl, {
+				headers: {
+					Authorization: `Bearer ${token}`,
+				},
+			});
+			
+			if (repoResponse.ok) {
+				const repoData = await repoResponse.json();
+				return !repoData.private; // Can create hooks if repo is public
+			}
+			return false;
+		}
+		return false;
 	}
-	return false;
+	
+	// Even with repo_hook, verify we have appropriate permissions on the specific repo
+	const repoUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/hooks`;
+	try {
+		const repoResponse = await fetch(repoUrl, {
+			method: 'GET',
+			headers: {
+				Authorization: `Bearer ${token}`,
+			},
+		});
+		
+		// Status 200 means we can list hooks, which indicates we can create them
+		// Status 404 might mean repo doesn't exist or no hooks yet, but shouldn't happen with valid repo
+		// Status 403 means we don't have permission
+		return repoResponse.status === 200;
+	} catch (error) {
+		console.log(`Error checking repository hook permissions: ${error}`);
+		return false;
+	}
 };
 
 const usePeriodicChecksInCodepipeline = (
@@ -283,7 +320,13 @@ export const getPipelineSourceOptions = async (
 			answers.pipeline.source.repoOwner,
 			answers.pipeline.source.repoName
 		);
-	answers.pipeline.source.repoHookEnable = await canTokenRepoHook(repoToken);
+	
+	// Pass the repo owner and name to check if hook can be created for this specific repo
+	answers.pipeline.source.repoHookEnable = await canTokenRepoHook(
+		repoToken,
+		answers.pipeline.source.repoOwner,
+		answers.pipeline.source.repoName
+	);
 
 	return answers;
 };
